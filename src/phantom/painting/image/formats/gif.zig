@@ -7,14 +7,14 @@ const Self = @This();
 base: phantom.painting.image.Format,
 allocator: Allocator,
 
-pub fn create(alloc: Allocator) Allocator.Error!*Self {
+pub fn create(alloc: Allocator) Allocator.Error!*phantom.painting.image.Format {
     const self = try alloc.create(Self);
     errdefer alloc.destroy(self);
 
     self.* = .{
         .base = .{
             .ptr = self,
-            .vtable = blk: {
+            .vtable = &(comptime blk: {
                 var vtable: phantom.painting.image.Format.VTable = .{
                     .create = createImage,
                     .readBuffer = readBuffer,
@@ -22,16 +22,16 @@ pub fn create(alloc: Allocator) Allocator.Error!*Self {
                     .deinit = deinit,
                 };
 
-                if (comptime hasFileSystem) {
+                if (hasFileSystem) {
                     vtable.readFile = readFile;
                     vtable.writeFile = writeFile;
                 }
-                break :blk &vtable;
-            },
+                break :blk vtable;
+            }),
         },
         .allocator = alloc,
     };
-    return self;
+    return &self.base;
 }
 
 fn createImage(ctx: *anyopaque, info: phantom.painting.image.Base.Info) anyerror!*phantom.painting.image.Base {
@@ -59,7 +59,7 @@ fn readFile(ctx: *anyopaque, file: std.fs.File) anyerror!*phantom.painting.image
     return error.Unimplemented;
 }
 
-fn writeFile(ctx: *anyopaque, base: *phantom.painting.image.Base, file: std.fs.File) anyerror!*usize {
+fn writeFile(ctx: *anyopaque, base: *phantom.painting.image.Base, file: std.fs.File) anyerror!usize {
     _ = ctx;
     _ = base;
     _ = file;
