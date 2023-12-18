@@ -1,0 +1,19 @@
+.{
+  .name = "phantom.image.gif",
+  .version = "0.1.0",
+  .paths = .{"."},
+  .dependencies = .{
+    .@"meta+" = .{
+      .url = "https://github.com/MidstallSoftware/meta-plus/archive/2ee7b6eea70dfdf52d88c378e603e2b886fdd5c3.tar.gz",
+      .hash = "12206db0349ec554a40f23e657bbcc197bc32bf2c4f94990daa3fb11a4eab165be6e",
+    },
+    .phantom = .{
+      .url = "https://github.com/PhantomUIx/core/archive/07fcf00d873a5f9d656551526217dfefc8534146.tar.gz",
+      .hash = "1220b8dee3618d11678b970b829e98e534a0c73211b534e479b6d60d4d06d9dfa3d0",
+    },
+    .vizops = .{
+      .url = "https://github.com/MidstallSoftware/vizops/archive/8b8499e195d8cf66e9b13ed1c80b24ee27420a29.tar.gz",
+      .hash = "1220f478cda5edf75a0b837e04c741631e4136e422b4257ccbd09d4cccaf736ac312",
+    },
+  },
+}
