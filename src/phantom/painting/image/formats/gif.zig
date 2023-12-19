@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const phantom = @import("phantom");
 const hasFileSystem = @hasDecl(std.os.system, "fd_t");
+const Base = @import("gif/base.zig");
+const Format = @import("gif/fmt.zig");
 const Self = @This();
 
 base: phantom.painting.image.Format,
@@ -35,15 +37,21 @@ pub fn create(alloc: Allocator) Allocator.Error!*phantom.painting.image.Format {
 }
 
 fn createImage(ctx: *anyopaque, info: phantom.painting.image.Base.Info) anyerror!*phantom.painting.image.Base {
-    _ = ctx;
-    _ = info;
-    return error.Unimplemented;
+    const self: *Self = @ptrCast(@alignCast(ctx));
+    return &(try Base.create(self.allocator, try Format.fromInfo(self.allocator, info))).base;
 }
 
 fn readBuffer(ctx: *anyopaque, buf: []const u8) anyerror!*phantom.painting.image.Base {
-    _ = ctx;
-    _ = buf;
-    return error.Unimplemented;
+    const self: *Self = @ptrCast(@alignCast(ctx));
+    var stream = std.io.fixedBufferStream(buf);
+
+    var fmt = Format.read(self.allocator, stream.reader()) catch |err| {
+        std.debug.print("{s} at {}\n", .{ @errorName(err), stream.pos });
+        return err;
+    };
+    errdefer fmt.deinit();
+
+    return &(try Base.create(self.allocator, fmt)).base;
 }
 
 fn writeBuffer(ctx: *anyopaque, base: *phantom.painting.image.Base, buf: []u8) anyerror!usize {
