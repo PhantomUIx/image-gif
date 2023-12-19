@@ -38,7 +38,11 @@ pub fn create(alloc: Allocator) Allocator.Error!*phantom.painting.image.Format {
 
 fn createImage(ctx: *anyopaque, info: phantom.painting.image.Base.Info) anyerror!*phantom.painting.image.Base {
     const self: *Self = @ptrCast(@alignCast(ctx));
-    return &(try Base.create(self.allocator, try Format.fromInfo(self.allocator, info))).base;
+    return &(try Base.create(self.allocator, try Format.init(self.allocator, .{
+        .width = @truncate(info.res.value[0]),
+        .height = @truncate(info.res.value[1]),
+        .depth = @intCast(info.colorFormat.channelSize() - 1),
+    }))).base;
 }
 
 fn readBuffer(ctx: *anyopaque, buf: []const u8) anyerror!*phantom.painting.image.Base {

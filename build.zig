@@ -24,6 +24,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lzw = b.dependency("lzw", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const phantom = b.dependency("phantom", .{
         .target = target,
         .optimize = optimize,
@@ -44,6 +49,10 @@ pub fn build(b: *std.Build) void {
             .{
                 .name = "phantom",
                 .module = phantom.module("phantom"),
+            },
+            .{
+                .name = "lzw",
+                .module = lzw.module("lzw"),
             },
         },
     });

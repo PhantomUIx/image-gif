@@ -6,6 +6,7 @@ const Self = @This();
 
 base: phantom.painting.image.Base,
 fmt: *Format,
+buffers: ?std.ArrayList(*phantom.painting.fb.Base),
 allocator: Allocator,
 
 pub fn create(alloc: Allocator, fmt: *Format) Allocator.Error!*Self {
@@ -23,41 +24,18 @@ pub fn create(alloc: Allocator, fmt: *Format) Allocator.Error!*Self {
         },
         .fmt = fmt,
         .allocator = alloc,
+        .buffers = null,
     };
     return self;
 }
 
 fn buffer(ctx: *anyopaque, i: usize) anyerror!*phantom.painting.fb.Base {
     const self: *Self = @ptrCast(@alignCast(ctx));
-    if (i > self.fmt.images.items.len) return error.InvalidSeq;
 
-    const img = &self.fmt.images.items[i];
-    const inf = self.fmt.imageInfo();
-    const colorTable = if (img.lct.items.len > 0) img.lct else self.fmt.colorTable;
+    if (self.buffers == null) self.buffers = try self.fmt.render();
 
-    const fb = try phantom.painting.fb.AllocatedFrameBuffer.create(self.allocator, .{
-        .res = inf.res,
-        .colorspace = inf.colorspace,
-        .colorFormat = inf.colorFormat,
-    });
-    errdefer fb.deinit();
-
-    var ioff: usize = img.y * self.fmt.width + img.x;
-    var y: usize = 0;
-    while (y < img.height) : (y += 1) {
-        var x: usize = 0;
-        while (x < img.width) : (x += 1) {
-            const index = img.buf[(img.y + y) * self.fmt.width + img.x + x];
-            const color = &colorTable.items[index * 3];
-
-            if (self.fmt.gce.transparency == 0 or index != self.fmt.gce.tindex) {
-                try fb.write((ioff + x) * 3, &[_]u8{ color.r, color.g, color.b });
-            }
-        }
-
-        ioff += self.fmt.width;
-    }
-    return fb;
+    if (i > self.buffers.?.items.len) return error.OutOfBounds;
+    return try self.buffers.?.items[i].dupe();
 }
 
 fn info(ctx: *anyopaque) phantom.painting.image.Base.Info {
@@ -67,6 +45,12 @@ fn info(ctx: *anyopaque) phantom.painting.image.Base.Info {
 
 fn deinit(ctx: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(ctx));
+
+    if (self.buffers) |buffers| {
+        for (buffers.items) |fb| fb.deinit();
+        buffers.deinit();
+    }
+
     self.fmt.deinit();
     self.allocator.destroy(self);
 }

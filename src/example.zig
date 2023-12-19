@@ -27,5 +27,10 @@ pub fn main() !void {
     const image = try format.readBuffer(@embedFile("example.gif"));
     defer image.deinit();
 
-    std.debug.print("{}\n{}\n", .{ image, image.info() });
+    for (0..image.info().seqCount) |i| {
+        const fb = try image.buffer(i);
+        defer fb.deinit();
+    }
+
+    std.debug.print("{}\n", .{image});
 }

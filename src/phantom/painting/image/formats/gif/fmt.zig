@@ -1,365 +1,590 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const phantom = @import("phantom");
+const lzw = @import("lzw");
+const vizops = @import("vizops");
+const Types = @import("types.zig");
 const Self = @This();
 
-pub const Color = extern struct { r: u8, g: u8, b: u8 };
+pub const Color = vizops.color.types.sRGB(u8);
 
-pub const Gce = struct {
-    delay: u16 = 0,
-    tindex: u8 = 0,
-    disposal: u8 = 0,
-    input: u32 = 0,
-    transparency: u32 = 0,
+pub const CommentExt = struct {
+    value: []u8,
+
+    pub fn deinit(self: CommentExt, alloc: Allocator) void {
+        alloc.free(self.value);
+    }
 };
 
-pub const Image = struct {
-    x: u16,
-    y: u16,
+pub const AppExt = struct {
+    appId: [8]u8,
+    authCode: [3]u8,
+    data: []u8,
+
+    pub fn deinit(self: AppExt, alloc: Allocator) void {
+        alloc.free(self.data);
+    }
+};
+
+pub const SubImage = struct {
+    lct: std.ArrayListUnmanaged(Color) = .{},
+    imageDesc: Types.ImageDesc = .{},
+    pixels: []u8 = &.{},
+
+    pub fn deinit(self: *SubImage, alloc: Allocator) void {
+        alloc.free(self.pixels);
+        self.lct.deinit(alloc);
+    }
+};
+
+pub const FrameData = struct {
+    gfxCtrl: ?Types.GfxCtrlExt = null,
+    subImages: std.ArrayListUnmanaged(SubImage) = .{},
+
+    pub fn deinit(self: *FrameData, alloc: Allocator) void {
+        for (self.subImages.items) |*subImg| subImg.deinit(alloc);
+        self.subImages.deinit(alloc);
+    }
+
+    pub fn addSubImage(self: *FrameData, alloc: Allocator) !*SubImage {
+        const subImage = try self.subImages.addOne(alloc);
+        subImage.* = .{};
+        return subImage;
+    }
+};
+
+pub const Options = struct {
+    version: Types.Version = .@"87a",
     width: u16,
     height: u16,
-    lct: std.ArrayList(Color),
-    buf: []usize,
-
-    pub fn deinit(self: Image) void {
-        self.lct.deinit();
-        self.lct.allocator.free(self.buf);
-    }
+    depth: u3 = 7,
 };
 
-const TableEntry = struct {
-    len: usize,
-    prefix: u16,
-    suffix: u8,
-
-    pub fn def(key: u16) TableEntry {
-        return .{
-            .len = 1,
-            .prefix = 0xFFF,
-            .suffix = @truncate(key),
-        };
-    }
+const ReadContext = struct {
+    currFrameData: ?*FrameData = null,
+    hasAnimAppExt: bool = false,
 };
 
-width: u16,
-height: u16,
-depth: u8,
-backgroundColor: u8,
-aspectRatio: u8,
-loopCount: u16,
-colorTable: std.ArrayList(Color),
-images: std.ArrayList(Image),
-gce: Gce,
+version: Types.Version,
+hdr: Types.Header,
+gct: std.ArrayListUnmanaged(Color) = .{},
+frames: std.ArrayList(FrameData),
+comments: std.ArrayListUnmanaged(CommentExt) = .{},
+appInfos: std.ArrayListUnmanaged(AppExt) = .{},
 
-fn discardSubblocks(reader: anytype) !void {
-    while (true) {
-        const size = try reader.readInt(u8, .little);
-        if (size == 0) break;
-        _ = try reader.skipBytes(size, .{});
-    }
-}
-
-fn interlaceLineIndex(h: usize, y: usize) usize {
-    var p = (h - 1) / 8 + 1;
-    if (y < p) return y * 8;
-
-    var y2 = y - p;
-    p = (h - 5) / 8 + 1;
-    if (y2 < p) return y2 * 8 + 4;
-
-    y2 -= p;
-    p = (h - 3) / 4 + 1;
-    if (y2 < p) return y2 * 4 + 2;
-
-    y2 -= p;
-    return y2 * 2 + 1;
-}
-
-fn getKey(reader: anytype, keySize: usize, subLen: *u8, shift: *usize, byte: *u8) !u16 {
-    var rpad: usize = 0;
-    var key: u16 = 0;
-    var bitsRead: usize = 0;
-    var fragSize: usize = 0;
-
-    while (bitsRead < keySize) : (bitsRead += fragSize) {
-        rpad = @intCast((shift.* + bitsRead) % 8);
-        if (rpad == 0) {
-            if (subLen.* == 0) {
-                subLen.* = try reader.readInt(u8, .little);
-                if (subLen.* == 0) return 0x1000;
-            }
-
-            byte.* = try reader.readInt(u8, .little);
-            subLen.* -= 1;
-        }
-
-        fragSize = @min(keySize - bitsRead, 8 - rpad);
-        key |= @intCast((byte.* >> @as(u3, @intCast(rpad))) << @as(u3, @truncate(bitsRead)));
-    }
-
-    key &= @truncate((@as(usize, 1) << @as(u6, @truncate(keySize))) - 1);
-    shift.* = (shift.* + keySize) % 8;
-    return key;
-}
-
-pub fn fromInfo(alloc: Allocator, info: phantom.painting.image.Base.Info) !*Self {
+pub fn init(alloc: Allocator, options: Options) !*Self {
     const self = try alloc.create(Self);
     errdefer alloc.destroy(self);
 
     self.* = .{
-        .width = @intCast(info.res.value[0]),
-        .height = @intCast(info.res.value[1]),
-        .depth = @intCast(info.colorFormat.channelSize()),
-        .backgroundColor = 0,
-        .aspectRatio = 0,
-        .loopCount = 0,
-        .colorTable = std.ArrayList(Color).init(alloc),
-        .images = std.ArrayList(Image).init(alloc),
-        .gce = .{},
+        .version = options.version,
+        .hdr = .{
+            .magic = .{ 'G', 'I', 'F' },
+            .version = @tagName(options.version)[0..3].*,
+            .width = options.width,
+            .height = options.height,
+            .flags = .{
+                .colorDepth = options.depth,
+            },
+        },
+        .frames = std.ArrayList(FrameData).init(alloc),
     };
     return self;
 }
 
 pub fn read(alloc: Allocator, reader: anytype) !*Self {
-    var sig: [3]u8 = undefined;
-    _ = try reader.read(&sig);
-    if (!std.mem.eql(u8, &sig, "GIF")) return error.InvalidMagic;
+    const hdr = try reader.readStruct(Types.Header);
+    if (!std.mem.eql(u8, &hdr.magic, "GIF")) return error.InvalidMagic;
 
-    var ver: [3]u8 = undefined;
-    _ = try reader.read(&ver);
-    if (!std.mem.eql(u8, &ver, "89a")) return error.InvalidMagic;
-
-    const width = try reader.readInt(u16, .little);
-    const height = try reader.readInt(u16, .little);
-
-    const fdsz = try reader.readInt(u8, .little);
-
-    if ((fdsz & 0x80) == 0) return error.MissingGct;
-
-    const depth = ((fdsz >> 4) & 7) + 1;
-    const gctsz = @as(usize, 1) << @as(u6, @intCast((fdsz & 0x7) + 1));
-
-    const backgroundColor = try reader.readInt(u8, .little);
-    const aspectRatio = try reader.readInt(u8, .little);
+    const version = std.meta.stringToEnum(Types.Version, &hdr.version) orelse return error.InvalidVersion;
 
     const self = try alloc.create(Self);
+    errdefer alloc.destroy(self);
+
     self.* = .{
-        .width = width,
-        .height = height,
-        .depth = depth,
-        .backgroundColor = backgroundColor,
-        .aspectRatio = aspectRatio,
-        .loopCount = 0,
-        .colorTable = try std.ArrayList(Color).initCapacity(alloc, gctsz),
-        .images = std.ArrayList(Image).init(alloc),
-        .gce = undefined,
+        .version = version,
+        .hdr = hdr,
+        .frames = std.ArrayList(FrameData).init(alloc),
     };
-    errdefer {
-        for (self.images.items) |img| img.deinit();
-        self.colorTable.deinit();
-        self.images.deinit();
-        alloc.destroy(self);
-    }
 
-    var i: usize = 0;
-    while (i < gctsz) : (i += 1) {
-        self.colorTable.appendAssumeCapacity(try reader.readStruct(Color));
-    }
+    const gctSize = @as(usize, 1) << (@as(u6, @intCast(self.hdr.flags.gctSize)) + 1);
+    try self.gct.ensureTotalCapacity(self.frames.allocator, gctSize);
 
-    while (true) {
-        const sep = try reader.readInt(u8, .little);
-        switch (sep) {
-            '!' => {
-                const label = try reader.readInt(u8, .little);
-                switch (label) {
-                    0x1 => {
-                        _ = try reader.skipBytes(13, .{});
-                        try discardSubblocks(reader);
-                    },
-                    0xF9 => {
-                        _ = try reader.skipBytes(1, .{});
+    if (self.hdr.flags.hasGct) {
+        var i: usize = 0;
+        while (i < gctSize) : (i += 1) {
+            const red = try reader.readInt(u8, .little);
+            const green = try reader.readInt(u8, .little);
+            const blue = try reader.readInt(u8, .little);
 
-                        const rdit = try reader.readInt(u8, .little);
-                        self.gce.disposal = (rdit >> 2) & 3;
-                        self.gce.input = rdit & 2;
-                        self.gce.transparency = rdit & 1;
-                        self.gce.delay = try reader.readInt(u16, .little);
-                        self.gce.tindex = try reader.readInt(u8, .little);
-
-                        _ = try reader.skipBytes(1, .{});
-                    },
-                    0xFE => try discardSubblocks(reader),
-                    0xFF => {
-                        try reader.skipBytes(1, .{});
-
-                        var appId: [8]u8 = undefined;
-                        _ = try reader.read(&appId);
-
-                        var authCode: [3]u8 = undefined;
-                        _ = try reader.read(&authCode);
-
-                        if (!std.mem.eql(u8, &appId, "NETSCAPE")) {
-                            self.loopCount = try reader.readInt(u16, .little);
-                            _ = try reader.skipBytes(1, .{});
-                        } else {
-                            try discardSubblocks(reader);
-                        }
-                    },
-                    else => return error.InvalidExt,
-                }
-            },
-            ';' => break,
-            ',' => {
-                var x = try reader.readInt(u16, .little);
-                var y = try reader.readInt(u16, .little);
-
-                if (x >= self.width or y >= self.height) return error.InvalidPosition;
-
-                x = @min(x, self.width - x);
-                y = @min(y, self.height - y);
-
-                const fwidth = try reader.readInt(u16, .little);
-                const fheight = try reader.readInt(u16, .little);
-
-                const fisrz = try reader.readInt(u8, .little);
-                const interlace = (fisrz & 0x40) != 0;
-
-                var lct = std.ArrayList(Color).init(alloc);
-                errdefer lct.deinit();
-
-                if ((fisrz & 0x80) != 0) {
-                    const lctsz = @as(usize, 1) << @as(u6, @intCast((fisrz & 0x7) + 1));
-                    try lct.ensureTotalCapacity(lctsz);
-
-                    i = 0;
-                    while (i < lctsz) : (i += 1) {
-                        lct.appendAssumeCapacity(try reader.readStruct(Color));
-                    }
-                }
-
-                var keySize: usize = @intCast(try reader.readInt(u8, .little));
-                if (keySize < 2 or keySize > 8) return error.InvalidKeySize;
-                const initKeySize = keySize;
-
-                const clear = @as(usize, 1) << @as(u6, @intCast(keySize));
-                const stop = clear + 1;
-
-                var tbl = std.AutoHashMap(usize, TableEntry).init(alloc);
-                defer tbl.deinit();
-                var tblEntryCount = (@as(usize, 1) << @as(u6, @intCast(keySize))) + 2;
-
-                i = 0;
-                while (i < (@as(usize, 1) << @as(u6, @intCast(keySize)))) : (i += 1) {
-                    try tbl.put(i, TableEntry.def(@truncate(i)));
-                }
-
-                var subLen: u8 = 0;
-                var shift: usize = 0;
-                var byte: u8 = 0;
-                var key = try getKey(reader, keySize, &subLen, &shift, &byte);
-                var isTableFull = false;
-                var strlen: usize = 0;
-                var entry: TableEntry = undefined;
-                var ret: u8 = 0;
-
-                const size = @as(usize, @intCast(fwidth)) * @as(usize, @intCast(fheight));
-
-                const buf = try alloc.alloc(usize, @as(usize, @intCast(self.width)) * @as(usize, @intCast(self.height)));
-                errdefer alloc.free(buf);
-                @memset(buf, self.backgroundColor);
-
-                i = 0;
-                while (i < size) {
-                    if (key == clear) {
-                        keySize = initKeySize;
-                        tblEntryCount = (@as(usize, 1) << @as(u6, @intCast(keySize - 1))) + 2;
-                        isTableFull = false;
-                    } else if (!isTableFull) {
-                        if (tbl.getPtr(tblEntryCount)) |eptr| {
-                            eptr.* = .{
-                                .len = strlen + 1,
-                                .prefix = key,
-                                .suffix = entry.suffix,
-                            };
-                        } else {
-                            try tbl.put(tblEntryCount, .{
-                                .len = strlen + 1,
-                                .prefix = key,
-                                .suffix = entry.suffix,
-                            });
-                        }
-
-                        tblEntryCount += 1;
-                        if ((tblEntryCount & (tblEntryCount - 1)) == 0) ret = 1;
-
-                        if (tblEntryCount == 0x1000) {
-                            ret = 0;
-                            isTableFull = true;
-                        }
-                    }
-
-                    key = try getKey(reader, keySize, &subLen, &shift, &byte);
-                    if (key == clear) continue;
-                    if (key == stop or key == 0x1000) break;
-                    if (ret == 1) keySize += 1;
-
-                    entry = tbl.get(key) orelse TableEntry.def(key);
-                    strlen = entry.len;
-
-                    var z: usize = 0;
-                    while (z < strlen) : (z += 1) {
-                        const p = i + entry.len - 1;
-                        const px = p % fwidth;
-                        var py = p / fwidth;
-
-                        if (interlace) {
-                            py = interlaceLineIndex(@intCast(fheight), py);
-                        }
-
-                        buf[(y + py) * self.width + x + px] = entry.suffix;
-
-                        if (entry.prefix == 0xFFF) break;
-                        entry = tbl.get(entry.prefix) orelse TableEntry.def(entry.prefix);
-                    }
-
-                    i += strlen;
-                    if (key < tblEntryCount - 1 and !isTableFull) {
-                        tbl.getPtr(tblEntryCount - 1).?.suffix = entry.suffix;
-                    }
-                }
-
-                if (key == stop) {
-                    _ = try reader.skipBytes(1, .{});
-                }
-
-                try self.images.append(.{
-                    .x = x,
-                    .y = y,
-                    .width = fwidth,
-                    .height = fheight,
-                    .lct = lct,
-                    .buf = buf,
-                });
-            },
-            else => return error.InvalidSep,
+            self.gct.appendAssumeCapacity(.{
+                .value = .{ red, green, blue, 255 },
+            });
         }
     }
 
+    var context: ReadContext = .{};
+    try self.readData(&context, reader);
     return self;
 }
 
+fn readData(self: *Self, context: *ReadContext, reader: anytype) !void {
+    var blk = try reader.readEnum(Types.DataBlockKind, .little);
+    while (blk != .eof) {
+        var isGfx = false;
+        var extKind: ?Types.ExtKind = null;
+
+        switch (blk) {
+            .imageDesc => {
+                isGfx = true;
+            },
+            .ext => {
+                extKind = reader.readEnum(Types.ExtKind, .little) catch blk: {
+                    var byte = try reader.readByte();
+                    while (byte != Types.ExtBlockTerm) {
+                        byte = try reader.readByte();
+                    }
+                    break :blk null;
+                };
+
+                if (extKind) |extKindValue| {
+                    switch (extKindValue) {
+                        .gfxCtrl, .plainText => {
+                            isGfx = true;
+                        },
+                        else => {},
+                    }
+                } else {
+                    blk = try reader.readEnum(Types.DataBlockKind, .little);
+                }
+            },
+            .eof => return,
+        }
+
+        if (isGfx) {
+            try self.readGfxBlock(context, blk, extKind, reader);
+        } else {
+            try self.readSpecialBlock(context, extKind.?, reader);
+        }
+
+        blk = try reader.readEnum(Types.DataBlockKind, .little);
+    }
+}
+
+fn readGfxBlock(self: *Self, context: *ReadContext, blk: Types.DataBlockKind, extKind: ?Types.ExtKind, reader: anytype) !void {
+    if (extKind) |extKindValue| {
+        if (extKindValue == .gfxCtrl) {
+            context.currFrameData = try self.addFrame();
+            context.currFrameData.?.gfxCtrl = blk: {
+                _ = try reader.readByte();
+
+                var gfxCtrl: Types.GfxCtrlExt = undefined;
+                gfxCtrl.flags = try reader.readStruct(Types.GfxCtrlExt.Flags);
+                gfxCtrl.delay = try reader.readInt(u16, .little);
+
+                if (gfxCtrl.flags.hasTransparency) {
+                    gfxCtrl.transparentColor = try reader.readByte();
+                } else {
+                    _ = try reader.readByte();
+                    gfxCtrl.transparentColor = 0;
+                }
+
+                _ = try reader.readByte();
+                break :blk gfxCtrl;
+            };
+
+            const newBlk = try reader.readEnum(Types.DataBlockKind, .little);
+
+            try self.readGfxRenderingBlock(context, newBlk, null, reader);
+        } else if (extKindValue == .plainText) {
+            try self.readGfxRenderingBlock(context, blk, extKind, reader);
+        }
+    } else {
+        if (context.currFrameData == null) {
+            context.currFrameData = try self.addFrame();
+        } else if (context.hasAnimAppExt) {
+            context.currFrameData = try self.addFrame();
+        }
+
+        try self.readGfxRenderingBlock(context, blk, extKind, reader);
+    }
+}
+
+fn readGfxRenderingBlock(self: *Self, context: *ReadContext, blk: Types.DataBlockKind, extKind: ?Types.ExtKind, reader: anytype) !void {
+    switch (blk) {
+        .imageDesc => try self.readImgDesc(context, reader),
+        .ext => {
+            const kind = if (extKind) |value| value else try reader.readEnum(Types.ExtKind, .little);
+
+            switch (kind) {
+                .plainText => {
+                    const blkSize = try reader.readByte();
+                    try reader.skipBytes(blkSize, .{});
+
+                    const subBlkSize = try reader.readByte();
+                    try reader.skipBytes(subBlkSize + 1, .{});
+                },
+                else => return error.InvalidExtKind,
+            }
+        },
+        .eof => return,
+    }
+}
+
+fn readSpecialBlock(self: *Self, context: *ReadContext, extKind: Types.ExtKind, reader: anytype) !void {
+    switch (extKind) {
+        .comment => {
+            const entry = try self.comments.addOne(self.frames.allocator);
+
+            var list = try std.ArrayListUnmanaged(u8).initCapacity(self.frames.allocator, 256);
+            defer list.deinit(self.frames.allocator);
+
+            var blkSize = try reader.readByte();
+
+            while (blkSize > 0) {
+                var temp: [256]u8 = undefined;
+                _ = try reader.read(temp[0..blkSize]);
+
+                try list.appendSlice(self.frames.allocator, temp[0..blkSize]);
+                blkSize = try reader.readByte();
+            }
+
+            entry.value = try self.frames.allocator.dupe(u8, list.items);
+        },
+        .appExt => {
+            const appInfo = blk: {
+                _ = try reader.readByte();
+
+                var entry: AppExt = undefined;
+                _ = try reader.read(&entry.appId);
+                _ = try reader.read(&entry.authCode);
+
+                var list = try std.ArrayListUnmanaged(u8).initCapacity(self.frames.allocator, 256);
+                defer list.deinit(self.frames.allocator);
+
+                var blkSize = try reader.readByte();
+
+                while (blkSize > 0) {
+                    var temp: [256]u8 = undefined;
+                    _ = try reader.read(temp[0..blkSize]);
+
+                    try list.appendSlice(self.frames.allocator, temp[0..blkSize]);
+                    blkSize = try reader.readByte();
+                }
+
+                entry.data = try self.frames.allocator.dupe(u8, list.items);
+                break :blk entry;
+            };
+
+            for (Types.animAppExts) |animExt| {
+                if (std.mem.eql(u8, &appInfo.appId, animExt[0])) {
+                    if (std.mem.eql(u8, &appInfo.authCode, animExt[1])) {
+                        context.hasAnimAppExt = true;
+                        break;
+                    }
+                }
+            }
+
+            try self.appInfos.append(self.frames.allocator, appInfo);
+        },
+        else => return error.InvalidExtKind,
+    }
+}
+
+fn readImgDesc(self: *Self, context: *ReadContext, reader: anytype) !void {
+    if (context.currFrameData) |currFrameData| {
+        const subImg = try currFrameData.addSubImage(self.frames.allocator);
+        subImg.imageDesc = try reader.readStruct(Types.ImageDesc);
+
+        if (subImg.imageDesc.width == 0 or subImg.imageDesc.height == 0) return;
+
+        const lctSize = @as(usize, 1) << (@as(u6, @intCast(subImg.imageDesc.flags.lctSize)) + 1);
+        try subImg.lct.ensureTotalCapacity(self.frames.allocator, lctSize);
+
+        if (subImg.imageDesc.flags.hasLct) {
+            var i: usize = 0;
+            while (i < lctSize) : (i += 1) {
+                const red = try reader.readInt(u8, .little);
+                const green = try reader.readInt(u8, .little);
+                const blue = try reader.readInt(u8, .little);
+
+                subImg.lct.appendAssumeCapacity(.{
+                    .value = .{ red, green, blue, 255 },
+                });
+            }
+        }
+
+        const lzwMinCodeSize = try reader.readByte();
+        if (lzwMinCodeSize == @intFromEnum(Types.DataBlockKind.eof)) return error.InvalidLzwCodeSize;
+
+        subImg.pixels = try self.frames.allocator.alloc(u8, @as(usize, @intCast(subImg.imageDesc.height)) * @as(usize, @intCast(subImg.imageDesc.width)));
+        var pixelsStream = std.io.fixedBufferStream(subImg.pixels);
+
+        var decoder = try lzw.LittleDecoder.init(self.frames.allocator, lzwMinCodeSize);
+        defer decoder.deinit();
+
+        var blkSize = try reader.readByte();
+        while (blkSize > 0) {
+            var temp: [256]u8 = undefined;
+            _ = try reader.read(temp[0..blkSize]);
+
+            var tempStream = std.io.fixedBufferStream(&temp);
+
+            const list = try decoder.decode(tempStream.reader());
+            defer list.deinit();
+            _ = try pixelsStream.write(list.items);
+
+            blkSize = try reader.readByte();
+        }
+    }
+}
+
+pub fn render(self: *Self) !std.ArrayList(*phantom.painting.fb.Base) {
+    var frames = try std.ArrayList(*phantom.painting.fb.Base).initCapacity(self.frames.allocator, @min(self.frames.items.len, 1));
+    errdefer {
+        for (frames.items) |f| f.deinit();
+        frames.deinit();
+    }
+
+    if (self.frames.items.len == 0) {
+        const fb = try self.createFrameBuffer();
+        errdefer fb.deinit();
+
+        try fillPalette(fb, self.gct.items, null);
+        try fillWithBackgroundColor(fb, self.gct.items, self.hdr.backgroundColor);
+        frames.appendAssumeCapacity(fb);
+        return frames;
+    }
+
+    const canvas = try self.createFrameBuffer();
+    defer canvas.deinit();
+
+    const prevCanvas = try self.createFrameBuffer();
+    defer prevCanvas.deinit();
+
+    if (self.hdr.flags.hasGct) {
+        try fillPalette(canvas, self.gct.items, null);
+        try fillWithBackgroundColor(canvas, self.gct.items, self.hdr.backgroundColor);
+        try canvas.blt(.to, prevCanvas, .{});
+    }
+
+    const _hasGfxCtrl = self.hasGfxCtrl();
+
+    for (self.frames.items) |frame| {
+        const currFrame = try self.createFrameBuffer();
+        errdefer currFrame.deinit();
+
+        var transparentColor: ?u8 = null;
+        var disposeMethod = Types.GfxCtrlExt.Flags.DisposeMethod.none;
+
+        if (frame.gfxCtrl) |gfxCtrl| {
+            if (gfxCtrl.flags.hasTransparency) {
+                transparentColor = gfxCtrl.transparentColor;
+            }
+
+            disposeMethod = gfxCtrl.flags.disposeMethod;
+        }
+
+        if (self.hdr.flags.hasGct) {
+            try fillPalette(currFrame, self.gct.items, transparentColor);
+        }
+
+        for (frame.subImages.items) |*subImg| {
+            const ctable = if (subImg.imageDesc.flags.hasLct) subImg.lct.items else self.gct.items;
+
+            if (subImg.imageDesc.flags.hasLct) {
+                try fillPalette(currFrame, ctable, transparentColor);
+            }
+
+            try self.renderSubImage(subImg, currFrame, ctable, transparentColor);
+        }
+
+        try canvas.blt(.to, currFrame, .{});
+
+        if (!_hasGfxCtrl or (_hasGfxCtrl and frame.gfxCtrl != null)) {
+            try frames.append(currFrame);
+        } else {
+            currFrame.deinit();
+        }
+
+        switch (disposeMethod) {
+            .restorePrevious => try canvas.blt(.from, prevCanvas, .{}),
+            .restoreBackground => {
+                for (frame.subImages.items) |*subImg| {
+                    const ctable = if (subImg.imageDesc.flags.hasLct) subImg.lct.items else self.gct.items;
+                    try self.replaceWithBackground(subImg, canvas, ctable, transparentColor);
+                }
+
+                try canvas.blt(.to, prevCanvas, .{});
+            },
+            else => try canvas.blt(.to, prevCanvas, .{}),
+        }
+    }
+    return frames;
+}
+
 pub fn deinit(self: *Self) void {
-    for (self.images.items) |img| img.deinit();
-    self.colorTable.deinit();
-    self.images.deinit();
-    self.images.allocator.destroy(self);
+    for (self.frames.items) |*frame| frame.deinit(self.frames.allocator);
+    for (self.comments.items) |*comment| comment.deinit(self.frames.allocator);
+    for (self.appInfos.items) |*appInfo| appInfo.deinit(self.frames.allocator);
+
+    self.gct.deinit(self.frames.allocator);
+    self.comments.deinit(self.frames.allocator);
+    self.appInfos.deinit(self.frames.allocator);
+    self.frames.deinit();
+}
+
+pub fn addFrame(self: *Self) !*FrameData {
+    const frame = try self.frames.addOne();
+    frame.* = .{};
+    return frame;
 }
 
 pub fn imageInfo(self: *Self) phantom.painting.image.Base.Info {
+    const depth = @as(u8, @intCast(self.hdr.flags.colorDepth)) + 1;
     return .{
-        .res = .{ .value = .{ @intCast(self.width), @intCast(self.height) } },
-        .colorFormat = .{ .rgb = @splat(self.depth) },
+        .res = .{ .value = .{ @intCast(self.hdr.width), @intCast(self.hdr.height) } },
+        .colorFormat = if (self.hasTransparency()) .{ .rgba = @splat(depth) } else .{ .rgb = @splat(depth) },
         .colorspace = .sRGB,
-        .seqCount = self.images.items.len,
+        .seqCount = self.frames.items.len,
     };
+}
+
+pub fn hasTransparency(self: *Self) bool {
+    for (self.frames.items) |frame| {
+        if (frame.gfxCtrl) |gfxCtrl| {
+            if (gfxCtrl.flags.hasTransparency) return true;
+        }
+    }
+    return false;
+}
+
+pub fn hasGfxCtrl(self: *Self) bool {
+    for (self.frames.items) |frame| {
+        if (frame.gfxCtrl) |_| {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn createFrameBuffer(self: *Self) !*phantom.painting.fb.Base {
+    const inf = self.imageInfo();
+    return try phantom.painting.fb.AllocatedFrameBuffer.create(self.frames.allocator, .{
+        .res = inf.res,
+        .colorspace = inf.colorspace,
+        .colorFormat = inf.colorFormat,
+    });
+}
+
+fn fillPalette(fb: *phantom.painting.fb.Base, gct: []Color, transparentColor: ?u8) !void {
+    _ = transparentColor;
+
+    const size = @min(@reduce(.Mul, fb.info().res.value), gct.len);
+
+    const buffer = try fb.allocator.alloc(u8, @divExact(fb.info().colorFormat.width(), 8));
+    defer fb.allocator.free(buffer);
+
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        try gct[i].writeBuffer(fb.info().colorFormat, buffer);
+        try fb.write(i, buffer);
+    }
+}
+
+fn fillWithBackgroundColor(fb: *phantom.painting.fb.Base, gct: []Color, backgroundColor: u8) !void {
+    const buffer = try fb.allocator.alloc(u8, @divExact(fb.info().colorFormat.width(), 8));
+    defer fb.allocator.free(buffer);
+    try gct[backgroundColor].writeBuffer(fb.info().colorFormat, buffer);
+
+    var i: usize = 0;
+    while (i < @reduce(.Mul, fb.info().res.value)) : (i += 1) {
+        try fb.write(i, buffer);
+    }
+}
+
+fn renderSubImage(self: *Self, subImg: *SubImage, fb: *phantom.painting.fb.Base, gct: []Color, transparentColor: ?u8) !void {
+    if (subImg.imageDesc.flags.isInterlaced) {
+        var sourceY: usize = 0;
+
+        for (Types.interlacePasses) |pass| {
+            var targetY = pass[0] + subImg.imageDesc.top;
+
+            while (targetY < self.hdr.height) {
+                const sourceStride = sourceY * subImg.imageDesc.width;
+                const targetStride = targetY * self.hdr.width;
+
+                for (0..subImg.imageDesc.width) |sourceX| {
+                    const targetX = sourceX + subImg.imageDesc.left;
+
+                    const sourceIndex = sourceStride + sourceX;
+                    const targetIndex = targetStride + targetX;
+
+                    try plotPixel(subImg, fb, gct, sourceIndex, targetIndex, transparentColor);
+                }
+
+                targetY += pass[1];
+                sourceY += 1;
+            }
+        }
+    } else {
+        for (0..subImg.imageDesc.height) |sourceY| {
+            const targetY = sourceY + subImg.imageDesc.top;
+
+            const sourceStride = sourceY * subImg.imageDesc.width;
+            const targetStride = targetY * self.hdr.width;
+
+            for (0..subImg.imageDesc.width) |sourceX| {
+                const targetX = sourceX + subImg.imageDesc.left;
+
+                const sourceIndex = sourceStride + sourceX;
+                const targetIndex = targetStride + targetX;
+
+                try plotPixel(subImg, fb, gct, sourceIndex, targetIndex, transparentColor);
+            }
+        }
+    }
+}
+
+fn replaceWithBackground(self: *Self, subImg: *SubImage, fb: *phantom.painting.fb.Base, gct: []Color, transparentColor: ?u8) !void {
+    const backgroundColor = if (transparentColor) |v| v else self.hdr.backgroundColor;
+
+    const buffer = try fb.allocator.alloc(u8, @divExact(fb.info().colorFormat.width(), 8));
+    defer fb.allocator.free(buffer);
+    try gct[backgroundColor].writeBuffer(fb.info().colorFormat, buffer);
+
+    for (0..subImg.imageDesc.height) |sourceY| {
+        const targetY = sourceY + subImg.imageDesc.top;
+
+        const sourceStride = sourceY * subImg.imageDesc.width;
+        const targetStride = targetY * self.hdr.width;
+
+        for (0..subImg.imageDesc.width) |sourceX| {
+            const targetX = sourceX + subImg.imageDesc.left;
+
+            const sourceIndex = sourceStride + sourceX;
+            const targetIndex = targetStride + targetX;
+
+            if (sourceIndex >= subImg.pixels.len) continue;
+            try fb.write(targetIndex, buffer);
+        }
+    }
+}
+
+fn plotPixel(subImg: *SubImage, fb: *phantom.painting.fb.Base, gct: []Color, sourceIndex: usize, targetIndex: usize, transparentColor: ?u8) !void {
+    if (sourceIndex >= subImg.pixels.len) return;
+
+    if (transparentColor) |t| {
+        if (subImg.pixels[sourceIndex] == t) return;
+    }
+
+    const pixelIndex = subImg.pixels[sourceIndex];
+
+    const buffer = try fb.allocator.alloc(u8, @divExact(fb.info().colorFormat.width(), 8));
+    defer fb.allocator.free(buffer);
+
+    if (pixelIndex < gct.len) {
+        try gct[pixelIndex].writeBuffer(fb.info().colorFormat, buffer);
+        try fb.write(targetIndex, buffer);
+    }
 }
