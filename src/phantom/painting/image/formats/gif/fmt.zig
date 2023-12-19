@@ -29,14 +29,14 @@ pub const Image = struct {
 
 const TableEntry = struct {
     len: usize,
-    prefix: usize,
-    suffix: usize,
+    prefix: u16,
+    suffix: u8,
 
-    pub fn def(key: usize) TableEntry {
+    pub fn def(key: u16) TableEntry {
         return .{
             .len = 1,
             .prefix = 0xFFF,
-            .suffix = key,
+            .suffix = @truncate(key),
         };
     }
 };
@@ -75,9 +75,9 @@ fn interlaceLineIndex(h: usize, y: usize) usize {
     return y2 * 2 + 1;
 }
 
-fn getKey(reader: anytype, keySize: usize, subLen: *u8, shift: *usize, byte: *u8) !usize {
+fn getKey(reader: anytype, keySize: usize, subLen: *u8, shift: *usize, byte: *u8) !u16 {
     var rpad: usize = 0;
-    var key: usize = 0;
+    var key: u16 = 0;
     var bitsRead: usize = 0;
     var fragSize: usize = 0;
 
@@ -97,7 +97,7 @@ fn getKey(reader: anytype, keySize: usize, subLen: *u8, shift: *usize, byte: *u8
         key |= @intCast((byte.* >> @as(u3, @intCast(rpad))) << @as(u3, @truncate(bitsRead)));
     }
 
-    key &= @intCast((@as(usize, 1) << @as(u6, @truncate(keySize))) - 1);
+    key &= @truncate((@as(usize, 1) << @as(u6, @truncate(keySize))) - 1);
     shift.* = (shift.* + keySize) % 8;
     return key;
 }
@@ -248,6 +248,11 @@ pub fn read(alloc: Allocator, reader: anytype) !*Self {
                 defer tbl.deinit();
                 var tblEntryCount = (@as(usize, 1) << @as(u6, @intCast(keySize))) + 2;
 
+                i = 0;
+                while (i < (@as(usize, 1) << @as(u6, @intCast(keySize)))) : (i += 1) {
+                    try tbl.put(i, TableEntry.def(@truncate(i)));
+                }
+
                 var subLen: u8 = 0;
                 var shift: usize = 0;
                 var byte: u8 = 0;
@@ -321,6 +326,10 @@ pub fn read(alloc: Allocator, reader: anytype) !*Self {
                     if (key < tblEntryCount - 1 and !isTableFull) {
                         tbl.getPtr(tblEntryCount - 1).?.suffix = entry.suffix;
                     }
+                }
+
+                if (key == stop) {
+                    _ = try reader.skipBytes(1, .{});
                 }
 
                 try self.images.append(.{

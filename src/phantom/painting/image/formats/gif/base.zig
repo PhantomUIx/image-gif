@@ -44,10 +44,10 @@ fn buffer(ctx: *anyopaque, i: usize) anyerror!*phantom.painting.fb.Base {
 
     var ioff: usize = img.y * self.fmt.width + img.x;
     var y: usize = 0;
-    while (y < img.width) : (y += 1) {
+    while (y < img.height) : (y += 1) {
         var x: usize = 0;
-        while (x < img.height) : (x += 1) {
-            const index = (img.y + y) * self.fmt.width + img.x + x;
+        while (x < img.width) : (x += 1) {
+            const index = img.buf[(img.y + y) * self.fmt.width + img.x + x];
             const color = &colorTable.items[index * 3];
 
             if (self.fmt.gce.transparency == 0 or index != self.fmt.gce.tindex) {

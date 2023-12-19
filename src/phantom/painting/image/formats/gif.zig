@@ -45,10 +45,7 @@ fn readBuffer(ctx: *anyopaque, buf: []const u8) anyerror!*phantom.painting.image
     const self: *Self = @ptrCast(@alignCast(ctx));
     var stream = std.io.fixedBufferStream(buf);
 
-    var fmt = Format.read(self.allocator, stream.reader()) catch |err| {
-        std.debug.print("{s} at {}\n", .{ @errorName(err), stream.pos });
-        return err;
-    };
+    var fmt = try Format.read(self.allocator, stream.reader());
     errdefer fmt.deinit();
 
     return &(try Base.create(self.allocator, fmt)).base;
