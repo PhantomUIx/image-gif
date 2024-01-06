@@ -36,8 +36,8 @@ pub fn build(b: *std.Build) void {
     });
 
     const module = b.addModule("phantom.image.gif", .{
-        .source_file = .{ .path = b.pathFromRoot("src/phantom.zig") },
-        .dependencies = &.{
+        .root_source_file = .{ .path = b.pathFromRoot("src/phantom.zig") },
+        .imports = &.{
             .{
                 .name = "meta+",
                 .module = metaplus.module("meta+"),
@@ -69,10 +69,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_example.addModule("phantom", phantom.module("phantom"));
-    exe_example.addModule("phantom.image.gif", module);
-    exe_example.addModule("options", exe_options.createModule());
-    exe_example.addModule("vizops", vizops.module("vizops"));
+    exe_example.root_module.addImport("phantom", phantom.module("phantom"));
+    exe_example.root_module.addImport("phantom.image.gif", module);
+    exe_example.root_module.addImport("options", exe_options.createModule());
+    exe_example.root_module.addImport("vizops", vizops.module("vizops"));
     b.installArtifact(exe_example);
 
     if (!no_tests) {
@@ -86,9 +86,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
 
-        unit_tests.addModule("meta+", metaplus.module("meta+"));
-        unit_tests.addModule("vizops", vizops.module("vizops"));
-        unit_tests.addModule("phantom", phantom.module("phantom"));
+        unit_tests.root_module.addImport("meta+", metaplus.module("meta+"));
+        unit_tests.root_module.addImport("vizops", vizops.module("vizops"));
+        unit_tests.root_module.addImport("phantom", phantom.module("phantom"));
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         step_test.dependOn(&run_unit_tests.step);
