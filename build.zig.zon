@@ -1,23 +1,23 @@
 .{
-  .name = "phantom.image.gif",
-  .version = "0.1.0",
-  .paths = .{"."},
-  .dependencies = .{
-    .@"meta+" = .{
-      .url = "https://github.com/MidstallSoftware/meta-plus/archive/7a99d69a1d965e9598d9602ba4488babab50a6bf.tar.gz",
-      .hash = "122050a89efcff9674d40e4ba9f3bde81716cd982082a4725de3524318e2d9d69837",
+    .name = "phantom.image.gif",
+    .version = "0.1.0",
+    .paths = .{"."},
+    .dependencies = .{
+        .@"meta+" = .{
+            .url = "https://github.com/MidstallSoftware/meta-plus/archive/7a99d69a1d965e9598d9602ba4488babab50a6bf.tar.gz",
+            .hash = "122050a89efcff9674d40e4ba9f3bde81716cd982082a4725de3524318e2d9d69837",
+        },
+        .lzw = .{
+            .url = "https://github.com/MidstallSoftware/lzw.zig/archive/33c4e036a48a6b92da3749053a341c54d0b99d7b.tar.gz",
+            .hash = "122080cc2c0b8054a93e085f8a9167febe8c801301734824f6a6aa506d497553657f",
+        },
+        .phantom = .{
+            .url = "https://github.com/PhantomUIx/core/archive/13cb70007519475065743509e3a908c7105ded1d.tar.gz",
+            .hash = "12203b3735b8056b34491d5aa777ca5689d1031b1be03690f2cb5b18f6bacd42424f",
+        },
+        .vizops = .{
+            .url = "https://github.com/MidstallSoftware/vizops/archive/75ed00f8eb217d774878fc0416d882b5ebce2b07.tar.gz",
+            .hash = "1220f72b311022cffc91f2b08f1e958bf60e1ae0c4f84b7116b1de17ddfbad9b71e3",
+        },
     },
-    .lzw = .{
-      .url = "https://github.com/MidstallSoftware/lzw.zig/archive/33c4e036a48a6b92da3749053a341c54d0b99d7b.tar.gz",
-      .hash = "122080cc2c0b8054a93e085f8a9167febe8c801301734824f6a6aa506d497553657f",
-    },
-    .phantom = .{
-      .url = "https://github.com/PhantomUIx/core/archive/63912d18801ae6190ab4ce15d2fd8303b797d649.tar.gz",
-      .hash = "1220fcd5a5f024f9d9d40dd68c09f3a678fe73a40120d27b415156b81690cf5d91f4",
-    },
-    .vizops = .{
-      .url = "https://github.com/MidstallSoftware/vizops/archive/75ed00f8eb217d774878fc0416d882b5ebce2b07.tar.gz",
-      .hash = "1220f72b311022cffc91f2b08f1e958bf60e1ae0c4f84b7116b1de17ddfbad9b71e3",
-    },
-  },
 }
