@@ -12,8 +12,8 @@
             .hash = "122080cc2c0b8054a93e085f8a9167febe8c801301734824f6a6aa506d497553657f",
         },
         .phantom = .{
-            .url = "https://github.com/PhantomUIx/core/archive/7693599fbe60d82493c54ee614cded565e27ac37.tar.gz",
-            .hash = "12208f4d0a80d02b487394337fd0a0782138b031de15866ebad2fd632815f5df8da4",
+            .url = "https://github.com/PhantomUIx/core/archive/9f855a624bb786e5c71649a7dbba594fb28f53eb.tar.gz",
+            .hash = "122063ae279ef6825bef54beed0ea00af4340187fcb58610e6e3e7d8d631e7acbd47",
         },
         .vizops = .{
             .url = "https://github.com/MidstallSoftware/vizops/archive/cb7a23d02c3030056a59ff0cd856d95221e8da06.tar.gz",
